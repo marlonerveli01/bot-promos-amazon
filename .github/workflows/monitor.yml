@@ -2,8 +2,8 @@ name: Automacao Promos Amazon
 
 on:
   schedule:
-    # Executa automaticamente a cada 20 minutos
-    - cron: '*/20 * * * *'
+    # Executa a cada 10 minutos
+    - cron: '*/10 * * * *'
   push:
     branches:
       - main

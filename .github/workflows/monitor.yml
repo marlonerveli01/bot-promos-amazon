@@ -2,17 +2,20 @@ name: Automação Promos Amazon
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Roda a cada 30 minutos, todos os dias
-  workflow_dispatch: # Permite rodar manualmente para testar
+    # Roda a cada 30 minutos, todos os dias
+    - cron: '*/30 * * * *'
+  # Permite rodar manualmente para testar
+  workflow_dispatch:
 
 permissions:
-  contents: write # Permissão para salvar o arquivo de histórico
+  # Essencial para salvar o histórico no arquivo posted_deals.txt
+  contents: write
 
 jobs:
-  build:
+  check-deals:
     runs-on: ubuntu-latest
     steps:
-      - name: Baixar código
+      - name: Baixar repositório
         uses: actions/checkout@v4
 
       - name: Configurar Python
@@ -21,16 +24,19 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependências
+        #requests: para enviar para o Telegram, feedparser: para ler o feed
         run: pip install requests feedparser
 
-      - name: Rodar Robô Amazon
+      - name: Executar robô Amazon
         env:
+          # Segredos que você configurou no GitHub Settings
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           AMAZON_TAG: ${{ secrets.AMAZON_TAG }}
         run: python main.py
 
-      - name: Salvar Histórico (posted_deals.txt)
+      - name: Salvar histórico (posted_deals.txt)
+        # Salva as alterações no arquivo de texto para não repetir posts
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"

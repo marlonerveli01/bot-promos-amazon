@@ -2,56 +2,58 @@ import os
 import re
 import html
 import requests
-# import xml.etree.ElementTree as ET # Removemos o antigo parser estrito
-import feedparser # Adicionamos o novo parser tolerante
+import feedparser # Biblioteca tolerante para ler feeds
 from urllib.parse import urlparse
 
-# --- CONFIGURAÇÕES ---
+# --- CONFIGURAÇÕES DO TELEGRAM E AFILIADO ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-AMAZON_TAG = os.environ.get("AMAZON_TAG")
+AMAZON_TAG = os.environ.get("AMAZON_TAG", "achadosofe031-20") # Sua tag oficial
 
-# Arquivo para não repetir postagens
+# Arquivo para salvar o histórico e não repetir postagens
 HISTORY_FILE = "posted_deals.txt"
 
 def load_posted():
+    """Carrega o histórico de IDs já postados."""
     if not os.path.exists(HISTORY_FILE):
         return set()
     with open(HISTORY_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
 def save_posted(deal_id):
+    """Salva um novo ID no histórico."""
     with open(HISTORY_FILE, "a", encoding="utf-8") as f:
         f.write(f"{deal_id}\n")
 
 def tag_amazon_url(url, tag):
-    """Transforma link da Amazon em link de afiliado."""
-    # Tenta extrair o ASIN (código do produto)
+    """Transforma qualquer link da Amazon em link com sua tag de comissão."""
+    # Tenta extrair o ASIN (código único do produto Amazon)
     asin_match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url)
     if asin_match:
         asin = asin_match.group(1)
+        # Cria a URL limpa e oficial com a tag
         return f"https://www.amazon.com.br/dp/{asin}?tag={tag}"
     
-    # Se não achar ASIN, só anexa a tag (menos garantido, mas funciona)
+    # Caso seja outro formato de link da Amazon, anexa o parâmetro tag
     if "?" in url:
         return f"{url}&tag={tag}"
     return f"{url}?tag={tag}"
 
 def extract_coupon(text):
-    """Tenta achar códigos de cupom no texto."""
+    """Detecta padrões comuns de códigos de cupons no texto."""
     match = re.search(r"(?:cupom|código|code)[\s:]+([A-Z0-9_-]{4,20})", text, re.IGNORECASE)
     if match:
         return match.group(1).upper()
     return None
 
 def send_telegram_deal(deal):
-    """Envia a formatação final para o Telegram."""
+    """Publica a oferta com formatação visual atraente em HTML."""
     
     coupon_section = f"🎟️ <b>Cupom:</b> <code>{deal['coupon']}</code> (Toque p/ copiar)\n" if deal["coupon"] else ""
     price_section = f"💰 <b>Preço:</b> {deal['price']}\n" if deal["price"] else ""
 
     caption = (
-        f"🔥 <b>OFERTA DO DIA</b> | 📦 <b>AMAZON</b>\n\n"
+        f"🔥 <b>OFERTA IMPERDÍVEL</b> | 📦 <b>AMAZON</b>\n\n"
         f"📌 <b>{html.escape(deal['title'])}</b>\n\n"
         f"{price_section}"
         f"{coupon_section}\n"
@@ -62,89 +64,86 @@ def send_telegram_deal(deal):
     payload = {
         "chat_id": CHANNEL_ID,
         "text": caption,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        # disable_web_page_preview: False permite mostrar imagem do produto no Telegram
+        "disable_web_page_preview": False
     }
 
     try:
         res = requests.post(url, json=payload, timeout=10)
         return res.status_code == 200
-    except:
+    except Exception as e:
+        print(f"Erro ao enviar para o Telegram: {e}")
         return False
 
 def monitor_deals():
-    print("Iniciando monitoramento da Amazon...")
+    """Lógica principal de monitoramento e postagem."""
+    print("Iniciando monitoramento da Amazon via Pelando...")
     posted_deals = load_posted()
     
-    # Fonte de ofertas (Gatry é ótimo para o Brasil)
-    feed_url = "https://gatry.com/feed"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    # --- NOVA FONTE ESTÁVEL (Pelando - Ofertas Quentes) ---
+    feed_url = "https://www.pelando.com.br/api/rss/hot"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
 
     try:
         res = requests.get(feed_url, headers=headers, timeout=15)
-        
         if res.status_code != 200:
-            print(f"Erro ao ler feed: {res.status_code}")
+            print(f"Erro ao ler feed: status {res.status_code}")
             return
-
-        # Usando feedparser para parsing mais tolerante
+            
+        # feedparser lida bem com XML mal formatado
         feed = feedparser.parse(res.content)
         
-        # feedparser pode encontrar erros (mismatched tag etc.)
-        # mas ainda assim tenta preencher o feed da melhor forma.
-        # bozo indica se houve erro no feed.
-        if feed.bozo:
-            print(f"Alerta: Erro no feed detectado (continuando): {feed.bozo_exception}")
-
     except Exception as e:
         print(f"Falha ao conectar no feed: {e}")
         return
 
-    # No feedparser, acessamos a lista de itens com feed.entries
+    # No feedparser, acessamos os itens com feed.entries
     items = feed.entries
-    count = 0
+    new_deals = []
 
-    # Processa os itens do mais antigo para o mais novo
-    for item in reversed(items):
-        # Acessamos os campos como atributos de objeto no feedparser
+    # Processa os itens na ordem do feed
+    for item in items:
         title = item.title if hasattr(item, 'title') else ""
         link = item.link if hasattr(item, 'link') else ""
-        # O 'guid' do antigo parser vira 'id' no feedparser. Essencial para o histórico.
+        # guid vira 'id' no feedparser
         guid = item.id if hasattr(item, 'id') else link
         desc = item.description if hasattr(item, 'description') else ""
 
-        # SÓ PROCESSA SE FOR AMAZON E NÃO FOI POSTADO
+        # --- TRAVA DE SEGURANÇA: SÓ PROCESSA AMAZON E NÃO POSTADOS ---
         if guid in posted_deals or "amazon.com" not in link:
             continue
 
-        # Pega o preço se tiver no título
+        # Identifica o preço se tiver no título
         price_match = re.search(r"R\$\s*[\d\.,]+", title)
         price = price_match.group(0) if price_match else ""
         
-        # Tenta achar cupom
+        # Identifica cupom se houver
         coupon = extract_coupon(title + " " + desc)
 
-        # Cria o link de afiliado
+        # Cria a URL final de afiliado com sua tag
         affiliate_url = tag_amazon_url(link, AMAZON_TAG)
 
-        deal = {
+        new_deals.append({
             "id": guid,
-            "title": title.replace(price, "").strip(), # Remove preço do título p/ não repetir
+            "title": title.replace(price, "").strip(), # Título limpo
             "price": price,
             "coupon": coupon,
             "affiliate_url": affiliate_url
-        }
+        })
 
-        # Envia e salva no histórico
+    # Envia as novidades (limite de 3 por execução para não dar spam)
+    count = 0
+    for deal in new_deals[:3]:
         if send_telegram_deal(deal):
             save_posted(deal["id"])
-            print(f"Postado: {deal['title']}")
+            print(f"Oferta enviada: {deal['title']}")
             count += 1
-        
-        # Limite de 3 posts por vez para não dar spam
-        if count >= 3:
-            break
 
-    print(f"Ciclo finalizado com {count} novas ofertas.")
+    print(f"Ciclo finalizado. {count} novas ofertas da Amazon enviadas.")
 
 if __name__ == "__main__":
     monitor_deals()

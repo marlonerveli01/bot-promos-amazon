@@ -11,7 +11,7 @@ AMAZON_TAG = os.environ.get("AMAZON_TAG", "achadosofe031-20")
 
 HISTORY_FILE = "posted_deals.txt"
 
-# Canais públicos do Telegram que postam ofertas diárias da Amazon Brasil
+# Canais públicos de promoções da Amazon Brasil
 CHANNELS = [
     "promotop",
     "cmdiasyoutube",
@@ -20,19 +20,19 @@ CHANNELS = [
 ]
 
 def load_posted():
-    """Carrega histórico de produtos já postados para evitar repetições."""
+    """Carrega o histórico de itens já postados para não repetir ofertas."""
     if not os.path.exists(HISTORY_FILE):
         return set()
     with open(HISTORY_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
 def save_posted(deal_id):
-    """Salva o ID ou ASIN do produto no histórico."""
+    """Registra o item no histórico."""
     with open(HISTORY_FILE, "a", encoding="utf-8") as f:
         f.write(f"{deal_id}\n")
 
 def resolve_amazon_url(url, tag):
-    """Expande links encurtados (amzn.to), extrai o código ASIN e aplica a sua tag."""
+    """Expande links amzn.to/link.amazon, extrai o ASIN e aplica a sua tag."""
     final_url = url
     try:
         if any(domain in url.lower() for domain in ["amzn.to", "link.amazon", "bit.ly"]):
@@ -45,10 +45,9 @@ def resolve_amazon_url(url, tag):
             )
             final_url = res.url
     except Exception as e:
-        print(f"Erro ao resolver URL {url}: {e}")
+        print(f"Erro ao resolver URL: {e}")
         final_url = url
 
-    # Identifica o ASIN de 10 dígitos do produto
     asin_match = re.search(r"/(?:dp|gp/product|d)/([A-Z0-9]{10})", final_url)
     if asin_match:
         asin = asin_match.group(1)
@@ -61,7 +60,7 @@ def resolve_amazon_url(url, tag):
     return None, None
 
 def clean_title(text):
-    """Extrai o título limpo do produto ignorando nomes de outros canais."""
+    """Extrai o título limpo do produto ignorando nomes de canais."""
     ignore_keywords = [
         "promotop", "escolhasegura", "cmdias", "iskandar", "canaltech", 
         "canal", "grupo", "oferta", "forwarded", "link", "cupom", "http"
@@ -79,7 +78,7 @@ def clean_title(text):
         if lower.startswith("http"):
             continue
             
-        # Remove preços do título se houver
+        # Remove preços do título
         p_match = re.search(r"R\$\s*[\d\.,]+", clean)
         if p_match:
             clean = clean.replace(p_match.group(0), "").strip()
@@ -93,11 +92,11 @@ def clean_title(text):
     return "Produto em Oferta na Amazon"
 
 def parse_deal_details(text):
-    """Analisa o texto da postagem para extrair preço, forma de pagamento, cupons e regras."""
+    """Analisa o texto completo e extrai preço, desconto %, pagamento, cupons e regras."""
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     text_lower = text.lower()
 
-    # 1. Extração do Preço Promocional (prioriza valor após 'por' ou o último listado)
+    # 1. Preço promocional (procura o valor final ou após 'por')
     price_str = ""
     for line in lines:
         por_match = re.search(r'(?:por|a\s+partir\s+de)\s*:?\s*(R\$\s*[\d\.,]+)', line, re.IGNORECASE)
@@ -113,52 +112,55 @@ def parse_deal_details(text):
                 price_str = matches[-1]
                 break
 
-    # 2. Detecção de Cupons e Restrições (Ex: Porto Bank, NuPay, Visa)
-    coupon = None
-    coupon_note = ""
-    for line in lines:
-        c_match = re.search(r"(?:cupom|código|code)[\s:]+([A-Z0-9_-]{3,20})", line, re.IGNORECASE)
-        if c_match:
-            cand = c_match.group(1).upper()
-            if cand not in ["NOVO", "AQUI", "APP", "DO", "NO", "NA", "TELA", "PAGINA", "AMAZON", "FRETE", "COMPRE"]:
-                coupon = cand
-                l_cand = line.lower()
-                if "porto" in l_cand:
-                    coupon_note = "Cartão Porto Bank Visa"
-                elif "nupay" in l_cand or "nubank" in l_cand:
-                    coupon_note = "NuPay / Nubank"
-                elif "prime" in l_cand:
-                    coupon_note = "Membros Amazon Prime"
-                elif "app" in l_cand:
-                    coupon_note = "Exclusivo no App Amazon"
-                elif "visa" in l_cand:
-                    coupon_note = "Cartão Visa"
-                elif "mastercard" in l_cand:
-                    coupon_note = "Cartão Mastercard"
-                break
+    # 2. Desconto em porcentagem (ex: 10% off, 15% de desconto, -35%)
+    discount_pct = ""
+    pct_match = re.search(r'(?:-\s*)?(\d{1,2}%\s*(?:off|de\s+desconto)?)', text, re.IGNORECASE)
+    if pct_match and "%" in pct_match.group(1):
+        discount_pct = pct_match.group(1).strip()
 
-    # 3. Forma de Pagamento (PIX, Boleto, Cartões específicos)
-    pay_methods = []
-    if "pix" in text_lower:
-        pay_methods.append("À vista no PIX")
+    # 3. Formas de Pagamento
+    payments = []
+    if re.search(r'(?:à\s*vista|a\s*vista)\s+no\s+cart[aã]o', text_lower):
+        payments.append("À vista no Cartão de Crédito")
+    elif "pix" in text_lower:
+        payments.append("À vista no PIX")
     elif "boleto" in text_lower:
-        pay_methods.append("Boleto bancário")
+        payments.append("Boleto bancário")
     elif "à vista" in text_lower or "a vista" in text_lower:
-        pay_methods.append("À vista")
+        payments.append("À vista")
 
-    # Adiciona menção a cartão específico se não estiver no cupom
-    if ("porto bank" in text_lower or "porto seguro" in text_lower) and "porto" not in coupon_note.lower():
-        pay_methods.append("Cartão Porto Bank Visa")
-    elif ("nupay" in text_lower or "nubank" in text_lower) and "nupay" not in coupon_note.lower():
-        pay_methods.append("NuPay")
+    # Cartões específicos
+    if "porto bank" in text_lower or "porto seguro" in text_lower:
+        payments.append("Cartão Porto Bank Visa")
+    elif "nupay" in text_lower or "nubank" in text_lower:
+        payments.append("NuPay / Nubank")
 
-    sj_match = re.search(r"(\d+x\s+sem\s+juros)", text_lower)
-    if sj_match:
-        pay_methods.append(sj_match.group(1))
+    # Parcelamento sem juros
+    parcelas_m = re.search(r'(\d+x\s+(?:de\s+R\$\s*[\d\.,]+\s+)?sem\s+juros)', text_lower)
+    if parcelas_m:
+        payments.append(f"Em até {parcelas_m.group(1)}")
+    elif re.search(r'sem\s+juros', text_lower) and "sem juros" not in " ".join(payments).lower():
+        payments.append("Parcelamento sem juros")
 
-    payment_info = " ou ".join(pay_methods) if pay_methods else None
+    # 4. Cupons e Códigos de Desconto
+    coupons = []
+    c_matches = re.findall(r'(?:cupom|c[oó]digo|code)[\s:]+([A-Z0-9_-]{3,20})', text, re.IGNORECASE)
+    for c in c_matches:
+        c_up = c.upper()
+        if c_up not in ["NOVO", "AQUI", "APP", "DO", "NO", "NA", "TELA", "PAGINA", "AMAZON", "FRETE", "COMPRE", "PARA", "COM"]:
+            note = ""
+            for line in lines:
+                if c_up in line.upper():
+                    l_low = line.lower()
+                    if "porto" in l_low: note = "Válido com Cartão Porto Bank"
+                    elif "prime" in l_low: note = "Exclusivo membros Prime"
+                    elif "nupay" in l_low: note = "Via NuPay"
+                    elif "app" in l_low: note = "Apenas no App Amazon"
+                    elif "visa" in l_low: note = "Cartões Visa"
+                    break
+            coupons.append({"code": c_up, "note": note})
 
-    # 4. Regras e Condições para Chegar no Menor Valor
+    # 5. Regras e Condições para Chegar no Menor Valor
     rules = []
     if "programe e poupe" in text_lower or "recorr" in text_lower:
         rules.append("Economize ainda mais selecionando <b>Programe e Poupe</b>")
@@ -169,40 +171,52 @@ def parse_deal_details(text):
     if "finaliza" in text_lower or "carrinho" in text_lower or "checkout" in text_lower:
         rules.append("Desconto aplicado na finalização da compra (no carrinho)")
         
-    if ("prime" in text_lower and any(w in text_lower for w in ["exclusivo", "membro", "assinante"])) and "prime" not in coupon_note.lower():
-        rules.append("Oferta ou desconto exclusivo para membros <b>Amazon Prime</b>")
+    if re.search(r'pr[eé]-venda', text_lower):
+        rules.append("Produto em <b>Pré-venda</b> com menor preço garantido")
+
+    if ("prime" in text_lower and any(w in text_lower for w in ["exclusivo", "membro", "assinante"])) and not any("prime" in c.get('note', '').lower() for c in coupons):
+        rules.append("Condição ou desconto exclusivo para membros <b>Amazon Prime</b>")
 
     if "mais por menos" in text_lower or any(k in text_lower for k in ["compre 2", "compre 3", "compre 5"]):
         rules.append("Desconto progressivo cumulativo na compra de mais unidades")
 
     return {
         "price": price_str,
-        "payment": payment_info,
-        "coupon": coupon,
-        "coupon_note": coupon_note,
+        "discount_pct": discount_pct,
+        "payments": payments,
+        "coupons": coupons,
         "rules": rules
     }
 
 def send_telegram_deal(deal):
-    """Envia a oferta formatada com detalhes completos de compra."""
+    """Envia a oferta formatada com as informações completas de pagamento e cupom."""
     caption = []
-    caption.append("🔥 <b>OFERTA DO DIA</b> | 📦 <b>AMAZON</b>\n")
+    caption.append("🔥 <b>OFERTA IMPERDÍVEL</b> | 📦 <b>AMAZON</b>\n")
     caption.append(f"📌 <b>{html.escape(deal['title'])}</b>\n")
 
-    if deal.get("price"):
-        caption.append(f"💰 <b>Preço:</b> {deal['price']}")
+    # Linha de Preço com Porcentagem de Desconto
+    price_line = f"💰 <b>Preço:</b> {deal['price']}" if deal.get("price") else ""
+    if deal.get("discount_pct") and price_line:
+        price_line += f" <i>({deal['discount_pct']})</i>"
+    if price_line:
+        caption.append(price_line)
 
-    if deal.get("payment"):
-        caption.append(f"💳 <b>Pagamento:</b> {deal['payment']}")
+    # Linha de Condição / Forma de Pagamento
+    if deal.get("payments"):
+        pay_str = " | ".join(deal["payments"])
+        caption.append(f"💳 <b>Condição:</b> {pay_str}")
 
-    if deal.get("coupon"):
-        c_str = f"🎟️ <b>Cupom:</b> <code>{deal['coupon']}</code> (toque p/ copiar)"
-        if deal.get("coupon_note"):
-            c_str += f"\n   ↳ <i>Válido com {deal['coupon_note']}</i>"
-        caption.append(c_str)
+    # Cupons
+    if deal.get("coupons"):
+        for c in deal["coupons"]:
+            c_text = f"🎟️ <b>Cupom:</b> <code>{c['code']}</code> (toque p/ copiar)"
+            if c.get("note"):
+                c_text += f"\n   ↳ <i>{c['note']}</i>"
+            caption.append(c_text)
 
+    # Regras e Detalhes
     if deal.get("rules"):
-        caption.append("\n📝 <b>Como chegar no menor valor:</b>")
+        caption.append("\n📝 <b>Como aproveitar o menor valor:</b>")
         for r in deal["rules"][:4]:
             caption.append(f"• {r}")
 
@@ -227,7 +241,7 @@ def send_telegram_deal(deal):
         return False
 
 def monitor_deals():
-    print("Iniciando varredura com extração detalhada de condições...")
+    print("Iniciando varredura com captura avançada de cupons, pagamentos e descontos...")
     posted_deals = load_posted()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -279,20 +293,19 @@ def monitor_deals():
                     "id": unique_key,
                     "title": title,
                     "price": details["price"],
-                    "payment": details["payment"],
-                    "coupon": details["coupon"],
-                    "coupon_note": details["coupon_note"],
+                    "discount_pct": details["discount_pct"],
+                    "payments": details["payments"],
+                    "coupons": details["coupons"],
                     "rules": details["rules"],
                     "affiliate_url": affiliate_url
                 })
 
         except Exception as e:
-            print(f"Erro ao processar canal @{channel}: {e}")
+            print(f"Erro no canal @{channel}: {e}")
             continue
 
-    print(f"Total de ofertas identificadas: {len(new_deals)}")
+    print(f"Total de ofertas elegíveis: {len(new_deals)}")
 
-    # Envia até 3 novidades por ciclo
     count = 0
     for deal in new_deals[:3]:
         if send_telegram_deal(deal):

@@ -2,13 +2,10 @@ name: Automacao Promos Amazon
 
 on:
   schedule:
-    # Executa a cada 30 minutos
     - cron: '*/30 * * * *'
-  # Permite disparar o teste manualmente pelo painel do GitHub
   workflow_dispatch:
 
 permissions:
-  # Permissão necessária para salvar e atualizar o arquivo posted_deals.txt
   contents: write
 
 jobs:
@@ -24,9 +21,7 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependencias
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests feedparser
+        run: pip install requests
 
       - name: Executar robo Amazon
         env:

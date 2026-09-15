@@ -1,6 +1,7 @@
 import os
 import re
 import html
+import time
 import requests
 from bs4 import BeautifulSoup
 
@@ -11,7 +12,7 @@ AMAZON_TAG = os.environ.get("AMAZON_TAG", "achadosofe031-20")
 
 HISTORY_FILE = "posted_deals.txt"
 
-# Canais públicos monitorados
+# Canais públicos de promoções da Amazon Brasil
 CHANNELS = [
     "promotop",
     "cmdiasyoutube",
@@ -26,17 +27,19 @@ BROWSER_HEADERS = {
 }
 
 def load_posted():
+    """Carrega o histórico de itens já postados para evitar repetições."""
     if not os.path.exists(HISTORY_FILE):
         return set()
     with open(HISTORY_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
 def save_posted(deal_id):
+    """Registra o identificador único do produto no arquivo de histórico."""
     with open(HISTORY_FILE, "a", encoding="utf-8") as f:
         f.write(f"{deal_id}\n")
 
 def resolve_amazon_url(url, tag):
-    """Expande amzn.to/link.amazon, extrai o ASIN e aplica a sua tag de afiliado."""
+    """Resolve links encurtados, extrai o código ASIN e aplica a sua tag de afiliado."""
     final_url = url
     try:
         if any(domain in url.lower() for domain in ["amzn.to", "link.amazon", "bit.ly"]):
@@ -57,7 +60,7 @@ def resolve_amazon_url(url, tag):
     return None, None
 
 def fetch_amazon_page_details(asin):
-    """Consulta diretamente a página do produto na Amazon para ler os blocos de promoção."""
+    """Inspeciona diretamente a página do produto na Amazon para ler os blocos de promoção e condições."""
     if not asin:
         return None
 
@@ -71,27 +74,33 @@ def fetch_amazon_page_details(asin):
         data = {
             "title": "",
             "price": "",
+            "discount_pct": "",
             "payments": [],
             "coupons": [],
             "rules": []
         }
 
-        # 1. Título oficial
+        # 1. Título do produto
         t_el = soup.find(id="productTitle")
         if t_el:
             data["title"] = t_el.get_text().strip()[:130]
 
-        # 2. Preço oficial
+        # 2. Preço
         price_el = soup.select_one(".a-price .a-offscreen")
         if price_el:
             data["price"] = price_el.get_text().strip()
 
-        # 3. Cabeçalho da Promoção (Resgatar / Cupons)
+        # 3. % de desconto na página
+        save_pct = soup.select_one(".savingsPercentage")
+        if save_pct:
+            pct_val = save_pct.get_text().strip().replace("-", "")
+            data["discount_pct"] = f"{pct_val} off"
+
+        # 4. Cabeçalho de Cupons / Promoções (Botão Resgatar, Porto Bank, etc.)
         promo_sec = soup.find(id="applicable_promotion_list_sec") or soup.find(class_=re.compile(r"promoPriceBlockMessage", re.I))
         if promo_sec:
             promo_text = re.sub(r'\s+', ' ', promo_sec.get_text()).strip()
             
-            # Procura código de cupom no cabeçalho
             c_match = re.search(r'(?:código|cupom|code)[\s:]+([A-Z0-9_-]{3,20})', promo_text, re.IGNORECASE)
             if c_match:
                 code = c_match.group(1).upper()
@@ -102,12 +111,11 @@ def fetch_amazon_page_details(asin):
                     note = "Exclusivo membros Prime"
                 data["coupons"].append({"code": code, "note": note})
             
-            # Adiciona a descrição da promoção às regras
             clean_rule = re.sub(r'Termos|Resgatar', '', promo_text).strip()
             if 10 < len(clean_rule) < 140:
                 data["rules"].append(clean_rule)
 
-        # 4. Formas de Pagamento (PIX, NuPay, Parcelamento)
+        # 5. Formas de Pagamento (PIX, NuPay, Parcelamento sem juros)
         page_text = res.text
         pix_match = re.search(r'(\d+%\s*off\s*à\s*vista\s*no\s*Pix\s*ou\s*NuPay)', page_text, re.IGNORECASE)
         if pix_match:
@@ -119,7 +127,7 @@ def fetch_amazon_page_details(asin):
         if inst_match:
             data["payments"].append(f"Em até {inst_match.group(1).strip()}")
 
-        # Programe e Poupe
+        # 6. Programe e Poupe
         if "programe e poupe" in page_text.lower():
             data["rules"].append("Economize extra ativando o <b>Programe e Poupe</b>")
 
@@ -128,7 +136,7 @@ def fetch_amazon_page_details(asin):
         return None
 
 def parse_telegram_text(text):
-    """Extrai informações do texto da postagem de origem (Fallback)."""
+    """Extrai informações do texto original da mensagem de origem (Fallback)."""
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     text_lower = text.lower()
 
@@ -144,44 +152,75 @@ def parse_telegram_text(text):
         if matches:
             price = matches[-1]
 
+    # Desconto %
+    discount_pct = ""
+    pct_match = re.search(r'(?:-\s*)?(\d{1,2}%\s*(?:off|de\s+desconto)?)', text, re.IGNORECASE)
+    if pct_match and "%" in pct_match.group(1):
+        discount_pct = pct_match.group(1).strip()
+
     # Pagamento
     payments = []
-    if "nupay" in text_lower:
-        payments.append("À vista no PIX ou NuPay")
+    if re.search(r'(?:à\s*vista|a\s*vista)\s+no\s+cart[aã]o', text_lower):
+        payments.append("À vista no Cartão de Crédito")
     elif "pix" in text_lower:
         payments.append("À vista no PIX")
+    elif "boleto" in text_lower:
+        payments.append("Boleto bancário")
     elif "à vista" in text_lower:
         payments.append("À vista")
 
-    sj_match = re.search(r'(\d+x\s+sem\s+juros)', text_lower)
-    if sj_match:
-        payments.append(sj_match.group(1))
+    if "porto bank" in text_lower or "porto seguro" in text_lower:
+        payments.append("Cartão Porto Bank Visa")
+    elif "nupay" in text_lower or "nubank" in text_lower:
+        payments.append("NuPay / Nubank")
+
+    parcelas_m = re.search(r'(\d+x\s+(?:de\s+R\$\s*[\d\.,]+\s+)?sem\s+juros)', text_lower)
+    if parcelas_m:
+        payments.append(f"Em até {parcelas_m.group(1)}")
+    elif re.search(r'sem\s+juros', text_lower) and "sem juros" not in " ".join(payments).lower():
+        payments.append("Parcelamento sem juros")
 
     # Cupons
     coupons = []
     c_matches = re.findall(r'(?:cupom|c[oó]digo|code)[\s:]+([A-Z0-9_-]{3,20})', text, re.IGNORECASE)
     for c in c_matches:
         c_up = c.upper()
-        if c_up not in ["NOVO", "AQUI", "APP", "DO", "NO", "NA", "TELA", "PAGINA", "AMAZON"]:
+        if c_up not in ["NOVO", "AQUI", "APP", "DO", "NO", "NA", "TELA", "PAGINA", "AMAZON", "FRETE", "COMPRE"]:
             note = ""
-            if "porto" in text_lower: note = "Cartão Porto Bank Visa"
-            elif "prime" in text_lower: note = "Membros Prime"
+            for line in lines:
+                if c_up in line.upper():
+                    l_cand = line.lower()
+                    if "porto" in l_cand: note = "Válido com Cartão Porto Bank Visa"
+                    elif "prime" in l_cand: note = "Exclusivo membros Prime"
+                    elif "nupay" in l_cand: note = "Via NuPay"
+                    elif "app" in l_cand: note = "Apenas no App Amazon"
+                    elif "visa" in l_cand: note = "Cartões Visa"
+                    break
             coupons.append({"code": c_up, "note": note})
 
+    # Regras
     rules = []
     if "programe e poupe" in text_lower or "recorr" in text_lower:
-        rules.append("Economize extra ativando o <b>Programe e Poupe</b>")
+        rules.append("Economize ainda mais selecionando <b>Programe e Poupe</b>")
+    if any(k in text_lower for k in ["na tela", "na página", "resgate", "resgatar", "marque"]):
+        rules.append("Ative/resgate o cupom de desconto na página do produto")
     if "finaliza" in text_lower or "carrinho" in text_lower:
-        rules.append("Desconto aplicado na finalização da compra")
+        rules.append("Desconto aplicado na finalização da compra (no carrinho)")
+    if re.search(r'pr[eé]-venda', text_lower):
+        rules.append("Produto em <b>Pré-venda</b> com menor preço garantido")
+    if ("prime" in text_lower and any(w in text_lower for w in ["exclusivo", "membro", "assinante"])) and not any("prime" in c.get('note', '').lower() for c in coupons):
+        rules.append("Condição exclusiva para membros <b>Amazon Prime</b>")
 
     return {
         "price": price,
+        "discount_pct": discount_pct,
         "payments": payments,
         "coupons": coupons,
         "rules": rules
     }
 
 def clean_title(text):
+    """Extrai título limpo descartando cabeçalhos de canais externos."""
     ignore_kw = ["promotop", "escolhasegura", "cmdias", "iskandar", "canaltech", "canal", "grupo", "http"]
     for line in [l.strip() for l in text.split('\n') if l.strip()]:
         clean = re.sub(r'^[^\w\s]+', '', line).strip()
@@ -195,17 +234,23 @@ def clean_title(text):
     return "Produto em Oferta na Amazon"
 
 def send_telegram_deal(deal):
-    """Monta a postagem completa e transparente para o canal."""
+    """Monta a postagem estruturada com detalhes completos da oferta."""
     caption = []
     caption.append("🔥 <b>OFERTA IMPERDÍVEL</b> | 📦 <b>AMAZON</b>\n")
     caption.append(f"📌 <b>{html.escape(deal['title'])}</b>\n")
 
-    if deal.get("price"):
-        caption.append(f"💰 <b>Preço:</b> {deal['price']}")
+    # Linha de Preço e Desconto %
+    price_line = f"💰 <b>Preço:</b> {deal['price']}" if deal.get("price") else ""
+    if deal.get("discount_pct") and price_line:
+        price_line += f" <i>({deal['discount_pct']})</i>"
+    if price_line:
+        caption.append(price_line)
 
+    # Condição / Pagamento
     if deal.get("payments"):
         caption.append(f"💳 <b>Condição:</b> {' | '.join(deal['payments'])}")
 
+    # Cupons
     if deal.get("coupons"):
         for c in deal["coupons"]:
             c_str = f"🎟️ <b>Cupom:</b> <code>{c['code']}</code> (toque p/ copiar)"
@@ -213,6 +258,7 @@ def send_telegram_deal(deal):
                 c_str += f"\n   ↳ <i>{c['note']}</i>"
             caption.append(c_str)
 
+    # Regras e Detalhes
     if deal.get("rules"):
         caption.append("\n📝 <b>Como aproveitar o menor valor:</b>")
         for r in deal["rules"][:3]:
@@ -236,7 +282,7 @@ def send_telegram_deal(deal):
         return False
 
 def monitor_deals():
-    print("Iniciando monitoramento com inspeção direta na Amazon...")
+    print("Iniciando varredura com captura de cupons, pagamentos e regras...")
     posted_deals = load_posted()
     new_deals = []
 
@@ -276,14 +322,13 @@ def monitor_deals():
                 if unique_key in posted_deals:
                     continue
 
-                # 1. Tenta buscar informações oficiais do cabeçalho da Amazon
+                # Inspeciona página na Amazon ou usa dados do Telegram
                 amazon_data = fetch_amazon_page_details(asin)
-                
-                # 2. Dados do Telegram como fallback ou complemento
                 tg_data = parse_telegram_text(raw_text)
 
                 title = (amazon_data and amazon_data["title"]) or clean_title(raw_text)
                 price = (amazon_data and amazon_data["price"]) or tg_data["price"]
+                discount_pct = (amazon_data and amazon_data["discount_pct"]) or tg_data["discount_pct"]
                 payments = (amazon_data and amazon_data["payments"]) or tg_data["payments"]
                 coupons = (amazon_data and amazon_data["coupons"]) or tg_data["coupons"]
                 rules = list(dict.fromkeys(((amazon_data and amazon_data["rules"]) or []) + tg_data["rules"]))
@@ -292,6 +337,7 @@ def monitor_deals():
                     "id": unique_key,
                     "title": title,
                     "price": price,
+                    "discount_pct": discount_pct,
                     "payments": payments,
                     "coupons": coupons,
                     "rules": rules,
@@ -302,14 +348,16 @@ def monitor_deals():
             print(f"Erro em @{channel}: {e}")
             continue
 
-    print(f"Total de ofertas identificadas: {len(new_deals)}")
+    print(f"Total de ofertas elegíveis: {len(new_deals)}")
 
+    # Envia até 6 ofertas com espaçamento de 1.5s entre postagens
     count = 0
-    for deal in new_deals[:3]:
+    for deal in new_deals[:6]:
         if send_telegram_deal(deal):
             save_posted(deal["id"])
             print(f"Postado com sucesso: {deal['title']}")
             count += 1
+            time.sleep(1.5)
 
     print(f"Ciclo finalizado. {count} novas ofertas enviadas ao canal.")
 

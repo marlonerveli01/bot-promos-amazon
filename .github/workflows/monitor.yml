@@ -2,10 +2,13 @@ name: Automacao Promos Amazon
 
 on:
   schedule:
+    # Executa a cada 30 minutos
     - cron: '*/30 * * * *'
+  # Permite disparar o teste manualmente pelo painel do GitHub
   workflow_dispatch:
 
 permissions:
+  # Permissão necessária para salvar e atualizar o arquivo posted_deals.txt
   contents: write
 
 jobs:
@@ -21,7 +24,9 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependencias
-        run: pip install requests feedparser
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests feedparser
 
       - name: Executar robo Amazon
         env:
@@ -32,8 +37,8 @@ jobs:
 
       - name: Salvar historico
         run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           touch posted_deals.txt
           git add posted_deals.txt
           git diff --quiet && git diff --staged --quiet || (git commit -m "Atualiza historico [skip ci]" && git push)

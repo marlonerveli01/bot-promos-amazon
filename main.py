@@ -2,7 +2,8 @@ import os
 import re
 import html
 import requests
-import xml.etree.ElementTree as ET
+# import xml.etree.ElementTree as ET # Removemos o antigo parser estrito
+import feedparser # Adicionamos o novo parser tolerante
 from urllib.parse import urlparse
 
 # --- CONFIGURAÇÕES ---
@@ -80,20 +81,36 @@ def monitor_deals():
 
     try:
         res = requests.get(feed_url, headers=headers, timeout=15)
-        root = ET.fromstring(res.content)
+        
+        if res.status_code != 200:
+            print(f"Erro ao ler feed: {res.status_code}")
+            return
+
+        # Usando feedparser para parsing mais tolerante
+        feed = feedparser.parse(res.content)
+        
+        # feedparser pode encontrar erros (mismatched tag etc.)
+        # mas ainda assim tenta preencher o feed da melhor forma.
+        # bozo indica se houve erro no feed.
+        if feed.bozo:
+            print(f"Alerta: Erro no feed detectado (continuando): {feed.bozo_exception}")
+
     except Exception as e:
-        print(f"Erro ao ler feed: {e}")
+        print(f"Falha ao conectar no feed: {e}")
         return
 
-    items = root.findall(".//item")
+    # No feedparser, acessamos a lista de itens com feed.entries
+    items = feed.entries
     count = 0
 
     # Processa os itens do mais antigo para o mais novo
     for item in reversed(items):
-        title = item.find("title").text if item.find("title") is not None else ""
-        link = item.find("link").text if item.find("link") is not None else ""
-        guid = item.find("guid").text if item.find("guid") is not None else link
-        desc = item.find("description").text if item.find("description") is not None else ""
+        # Acessamos os campos como atributos de objeto no feedparser
+        title = item.title if hasattr(item, 'title') else ""
+        link = item.link if hasattr(item, 'link') else ""
+        # O 'guid' do antigo parser vira 'id' no feedparser. Essencial para o histórico.
+        guid = item.id if hasattr(item, 'id') else link
+        desc = item.description if hasattr(item, 'description') else ""
 
         # SÓ PROCESSA SE FOR AMAZON E NÃO FOI POSTADO
         if guid in posted_deals or "amazon.com" not in link:
@@ -127,7 +144,7 @@ def monitor_deals():
         if count >= 3:
             break
 
-    print(f"Finalizado. {count} novas ofertas.")
+    print(f"Ciclo finalizado com {count} novas ofertas.")
 
 if __name__ == "__main__":
     monitor_deals()

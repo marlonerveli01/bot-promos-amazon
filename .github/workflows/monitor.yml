@@ -2,7 +2,11 @@ name: Automacao Promos Amazon
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    # Executa automaticamente a cada 20 minutos
+    - cron: '*/20 * * * *'
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:

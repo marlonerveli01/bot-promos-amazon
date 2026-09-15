@@ -2,6 +2,7 @@ import os
 import re
 import html
 import requests
+from bs4 import BeautifulSoup
 
 # --- CONFIGURAÇÕES ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -10,8 +11,12 @@ AMAZON_TAG = os.environ.get("AMAZON_TAG", "achadosofe031-20")
 
 HISTORY_FILE = "posted_deals.txt"
 
-# Canais públicos de ofertas monitorados via Telegram Web (sem bloqueio Cloudflare)
-MONITORED_CHANNELS = ["gatry", "promobitoficial"]
+# Canais públicos do Telegram ativos com ofertas da Amazon Brasil
+CHANNELS = [
+    "canaltech_ofertas",
+    "gatryofertas",
+    "ofertadodia"
+]
 
 def load_posted():
     if not os.path.exists(HISTORY_FILE):
@@ -23,17 +28,23 @@ def save_posted(deal_id):
     with open(HISTORY_FILE, "a", encoding="utf-8") as f:
         f.write(f"{deal_id}\n")
 
-def resolve_amazon_url(raw_url, tag):
-    """Resolve links encurtados (amzn.to), extrai o ASIN e aplica a sua tag."""
-    final_url = raw_url
+def resolve_amazon_url(url, tag):
+    """Expande links encurtados (amzn.to), extrai o código ASIN e aplica a sua tag."""
+    final_url = url
     try:
-        if "amzn.to" in raw_url:
-            res = requests.head(raw_url, allow_redirects=True, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        if "amzn.to" in url:
+            res = requests.get(
+                url, 
+                headers={"User-Agent": "Mozilla/5.0"}, 
+                allow_redirects=True, 
+                timeout=10, 
+                stream=True
+            )
             final_url = res.url
     except Exception:
-        final_url = raw_url
+        final_url = url
 
-    # Extrai o código único do produto (ASIN)
+    # Identifica o ASIN do produto
     asin_match = re.search(r"/(?:dp|gp/product|d)/([A-Z0-9]{10})", final_url)
     if asin_match:
         asin = asin_match.group(1)
@@ -72,71 +83,76 @@ def send_telegram_deal(deal):
     try:
         res = requests.post(url, json=payload, timeout=10)
         return res.status_code == 200
-    except Exception as e:
-        print(f"Erro ao enviar: {e}")
+    except Exception:
         return False
 
 def monitor_deals():
     print("Iniciando varredura via Telegram Web Engine...")
     posted_deals = load_posted()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
 
     new_deals = []
 
-    for channel in MONITORED_CHANNELS:
+    for channel in CHANNELS:
         url = f"https://t.me/s/{channel}"
         try:
             res = requests.get(url, headers=headers, timeout=15)
             if res.status_code != 200:
-                print(f"Status {res.status_code} ao ler @{channel}")
+                print(f"Canal @{channel} retornou status {res.status_code}")
                 continue
-            
-            # Divide a página nos blocos de mensagens
-            message_blocks = res.text.split('class="tgme_widget_message ')
-            print(f"Lidas {len(message_blocks) - 1} postagens de @{channel}")
 
-            for block in message_blocks[1:]:
-                # Extrai link da Amazon
-                amazon_match = re.search(r'href="([^"]*(?:amazon\.com\.br|amzn\.to)[^"]*)"', block)
-                if not amazon_match:
+            soup = BeautifulSoup(res.text, "html.parser")
+            messages = soup.find_all("div", class_="tgme_widget_message")
+            print(f"Lidas {len(messages)} postagens de @{channel}")
+
+            for msg in messages:
+                post_id = msg.get("data-post", "")
+                
+                # Extrai todo o texto da postagem
+                text_el = msg.find("div", class_="tgme_widget_message_text")
+                raw_text = text_el.get_text(separator="\n").strip() if text_el else ""
+
+                # Encontra todos os links contidos na mensagem
+                links = [a["href"] for a in msg.find_all("a", href=True)]
+                
+                # Busca também URLs de texto puro (caso não venham em tag <a>)
+                text_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
+                all_links = list(set(links + text_urls))
+
+                target_link = None
+                for l in all_links:
+                    if "amazon.com.br" in l or "amzn.to" in l:
+                        target_link = l
+                        break
+
+                if not target_link:
                     continue
 
-                raw_link = amazon_match.group(1).replace("&amp;", "&")
-                asin, affiliate_url = resolve_amazon_url(raw_link, AMAZON_TAG)
+                asin, affiliate_url = resolve_amazon_url(target_link, AMAZON_TAG)
                 if not affiliate_url:
                     continue
 
-                # Identificador único (ASIN do produto ou link)
-                deal_id = asin if asin else raw_link
-                if deal_id in posted_deals:
+                unique_key = asin if asin else post_id
+                if unique_key in posted_deals:
                     continue
 
-                # Extrai texto da mensagem
-                text_match = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', block, re.DOTALL)
-                if not text_match:
-                    continue
+                # Título da primeira linha
+                lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+                title = lines[0] if lines else "Produto em Oferta na Amazon"
 
-                raw_text = text_match.group(1)
-                clean_text = re.sub(r'<br\s*/?>', '\n', raw_text)
-                clean_text = re.sub(r'<[^>]+>', '', clean_text)
-                clean_text = html.unescape(clean_text).strip()
-
-                lines = [l.strip() for l in clean_text.split('\n') if l.strip()]
-                title = lines[0] if lines else "Produto em Oferta"
-
-                # Preço e Cupom
-                price_match = re.search(r"R\$\s*[\d\.,]+", clean_text)
+                # Preço e cupom
+                price_match = re.search(r"R\$\s*[\d\.,]+", raw_text)
                 price = price_match.group(0) if price_match else ""
                 if price and price in title:
                     title = title.replace(price, "").strip()
                 title = re.sub(r'[\s\-–|:]+$', '', title).strip()
 
-                coupon = extract_coupon(clean_text)
+                coupon = extract_coupon(raw_text)
 
                 new_deals.append({
-                    "id": deal_id,
+                    "id": unique_key,
                     "title": title[:140],
                     "price": price,
                     "coupon": coupon,
@@ -144,11 +160,12 @@ def monitor_deals():
                 })
 
         except Exception as e:
-            print(f"Erro ao consultar canal @{channel}: {e}")
+            print(f"Erro em @{channel}: {e}")
             continue
 
     print(f"Ofertas elegíveis encontradas: {len(new_deals)}")
 
+    # Envia até 3 por execução para evitar bloqueios por flood
     count = 0
     for deal in new_deals[:3]:
         if send_telegram_deal(deal):

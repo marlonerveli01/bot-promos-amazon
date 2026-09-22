@@ -25,19 +25,22 @@ HEADERS = {
 }
 
 def load_posted():
-    """Carrega histórico de produtos postados para não repetir."""
+    """Carrega o histórico de itens postados para não repetir."""
     if not os.path.exists(HISTORY_FILE):
         return set()
     with open(HISTORY_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
 def save_posted(deal_id):
-    """Salva o ID/ASIN no histórico."""
+    """Salva o ID ou ASIN do produto no histórico."""
     with open(HISTORY_FILE, "a", encoding="utf-8") as f:
         f.write(f"{deal_id}\n")
 
 def resolve_amazon_url(url, tag):
-    """Expande links encurtados, extrai o ASIN e aplica a sua tag de afiliado."""
+    """
+    Segue os redirecionamentos do link encurtado, extrai o código ASIN
+    e monta a URL limpa garantindo a sua tag de afiliado.
+    """
     final_url = url
     try:
         if any(domain in url.lower() for domain in ["amzn.to", "link.amazon", "bit.ly"]):
@@ -46,11 +49,13 @@ def resolve_amazon_url(url, tag):
     except Exception:
         final_url = url
 
+    # Localiza o ASIN de 10 caracteres alfanuméricos da Amazon
     asin_match = re.search(r"/(?:dp|gp/product|d)/([A-Z0-9]{10})", final_url)
     if asin_match:
         asin = asin_match.group(1)
         return asin, f"https://www.amazon.com.br/dp/{asin}?tag={tag}"
     
+    # Caso seja outro formato de link da Amazon
     if "amazon.com.br" in final_url:
         clean_url = final_url.split("?")[0]
         return None, f"{clean_url}?tag={tag}"
@@ -58,7 +63,7 @@ def resolve_amazon_url(url, tag):
     return None, None
 
 def clean_title(text):
-    """Extrai apenas o nome real do produto de forma limpa."""
+    """Extrai apenas o título do produto sem poluição visual ou nomes de canais."""
     ignore_keywords = [
         "promotop", "escolhasegura", "cmdias", "iskandar", "canaltech", 
         "canal", "grupo", "oferta", "forwarded", "link", "cupom", "http"
@@ -88,21 +93,42 @@ def clean_title(text):
             
     return "Produto em Oferta na Amazon"
 
-def extract_price(text):
-    """Extrai o preço promocional anunciado."""
+def extract_price_and_condition(text):
+    """Extrai o preço promocional real e sinaliza se o valor é no Pix ou à vista."""
     lines = [l.strip() for l in text.split('\n') if l.strip()]
+    text_lower = text.lower()
+    price_val = ""
+
+    # Prioriza linhas que tenham 'por R$ ...' ou 'a partir de R$ ...'
     for line in lines:
         por_match = re.search(r'(?:por|a\s+partir\s+de)\s*:?\s*(R\$\s*[\d\.,]+)', line, re.IGNORECASE)
         if por_match:
-            return por_match.group(1)
-            
-    matches = re.findall(r"R\$\s*[\d\.,]+", text)
-    if matches:
-        return matches[-1]
-    return ""
+            price_val = por_match.group(1)
+            break
+
+    # Fallback: pega o último valor da lista que não seja o preço original ('de R$ ...')
+    if not price_val:
+        for line in lines:
+            if re.match(r'^\s*de\s+R\$', line, re.IGNORECASE) and not re.search(r'por\s+R\$', line, re.IGNORECASE):
+                continue
+            matches = re.findall(r"R\$\s*[\d\.,]+", line)
+            if matches:
+                price_val = matches[-1]
+
+    if not price_val:
+        return ""
+
+    # Identifica se a condição é no Pix ou à vista
+    condition = ""
+    if "pix" in text_lower:
+        condition = " (no Pix)"
+    elif "à vista" in text_lower or "a vista" in text_lower:
+        condition = " (à vista)"
+
+    return f"{price_val}{condition}"
 
 def extract_coupon(text):
-    """Captura apenas se houver cupom explicitamente digitado no texto."""
+    """Captura apenas códigos de cupons reais e explícitos."""
     match = re.search(r'(?:cupom|código)[\s:]+([A-Z0-9_-]{4,20})', text, re.IGNORECASE)
     if match:
         cand = match.group(1).upper()
@@ -111,7 +137,7 @@ def extract_coupon(text):
     return None
 
 def send_telegram_deal(deal):
-    """Envia a oferta no formato clássico, limpo e sem complicações."""
+    """Monta e dispara a mensagem padronizada no canal."""
     caption = (
         f"🔥 <b>OFERTA DO DIA</b> | 📦 <b>AMAZON</b>\n\n"
         f"📌 <b>{html.escape(deal['title'])}</b>\n\n"
@@ -123,7 +149,10 @@ def send_telegram_deal(deal):
     if deal.get("coupon"):
         caption += f"🎟️ <b>Cupom:</b> <code>{deal['coupon']}</code> (toque p/ copiar)\n"
 
-    caption += f'\n🛒 <a href="{deal["affiliate_url"]}">VER PRODUTO NA AMAZON</a>'
+    caption += (
+        f'\n🛒 <a href="{deal["affiliate_url"]}">VER PRODUTO NA AMAZON</a>\n\n'
+        f"⚠️ <i>Preço e estoque sujeitos a alteração a qualquer momento.</i>"
+    )
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -141,7 +170,7 @@ def send_telegram_deal(deal):
         return False
 
 def monitor_deals():
-    print("Iniciando varredura no formato limpo e sem complicações...")
+    print("Iniciando varredura limpa e com tag de afiliado blindada...")
     posted_deals = load_posted()
     new_deals = []
 
@@ -182,7 +211,7 @@ def monitor_deals():
                     continue
 
                 title = clean_title(raw_text)
-                price = extract_price(raw_text)
+                price = extract_price_and_condition(raw_text)
                 coupon = extract_coupon(raw_text)
 
                 new_deals.append({
@@ -194,11 +223,12 @@ def monitor_deals():
                 })
 
         except Exception as e:
-            print(f"Erro ao ler canal @{channel}: {e}")
+            print(f"Erro ao ler @{channel}: {e}")
             continue
 
-    print(f"Total de ofertas reais encontradas: {len(new_deals)}")
+    print(f"Total de ofertas válidas encontradas: {len(new_deals)}")
 
+    # Envia até 6 ofertas com pausa de 1.5s entre cada postagem
     count = 0
     for deal in new_deals[:6]:
         if send_telegram_deal(deal):
@@ -207,7 +237,7 @@ def monitor_deals():
             count += 1
             time.sleep(1.5)
 
-    print(f"Ciclo finalizado. {count} novas ofertas enviadas.")
+    print(f"Ciclo finalizado. {count} novas ofertas enviadas ao canal.")
 
 if __name__ == "__main__":
     monitor_deals()
